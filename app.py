@@ -93,7 +93,7 @@ def normalize_weights(weights: np.ndarray) -> np.ndarray:
     """
     weights = np.asarray(weights, dtype=float)
     total = weights.sum()
-    if total <= 0:
+    if total <= 0 or np.isnan(total):
         return np.repeat(1.0 / len(weights), len(weights))
     return weights / total
 
@@ -403,15 +403,14 @@ def main():
     apply_theme()
     render_hero_section()
 
-    # Sidebar state
     state = render_sidebar()
 
     if not state["run_button"]:
         st.info("Select your inputs in the sidebar and click Run Analytics.")
         return
 
-    selected_etfs = state["selected_etfs"]
-    validate_selected_etfs(selected_etfs)
+    original_selected_etfs = state["selected_etfs"]
+    validate_selected_etfs(original_selected_etfs)
 
     start_date = state["start_date"]
     end_date = state["end_date"]
@@ -429,10 +428,12 @@ def main():
         st.error("Start date must be earlier than end date.")
         st.stop()
 
+    # -----------------------------------------------------
     # Load data
+    # -----------------------------------------------------
     with st.spinner("Downloading and preparing market data..."):
         loader = DataLoader(
-            tickers=selected_etfs,
+            tickers=original_selected_etfs,
             start_date=start_date,
             end_date=end_date,
             use_log_returns=use_log_returns,
@@ -444,31 +445,54 @@ def main():
     returns = data["returns"]
     benchmark_returns_df = data["benchmark_returns"]
     current_prices = data["current_prices"]
+    selected_etfs = data["valid_tickers"]
 
     if returns.empty:
         st.error("No return data available after cleaning. Please adjust date range or selections.")
         st.stop()
 
+    if len(selected_etfs) == 0:
+        st.error("No valid ETFs remain after price cleaning and alignment.")
+        st.stop()
+
+    removed_etfs = [t for t in original_selected_etfs if t not in selected_etfs]
+    if removed_etfs:
+        st.warning(
+            "The following ETFs were removed due to insufficient data coverage or alignment: "
+            + ", ".join(removed_etfs)
+        )
+
+    # -----------------------------------------------------
     # Optimizer
+    # -----------------------------------------------------
     optimizer = PortfolioOptimizer(
         returns=returns,
         risk_free_rate=risk_free_rate,
         covariance_method=covariance_method,
     )
 
+    # -----------------------------------------------------
     # Benchmark selection
-    benchmark_choice = st.selectbox(
-        "Relative Analytics Benchmark",
-        options=["SPY", "QQQ"],
-        index=0,
-    )
+    # -----------------------------------------------------
+    benchmark_options = []
+    if benchmark_returns_df is not None and not benchmark_returns_df.empty:
+        benchmark_options = [c for c in ["SPY", "QQQ"] if c in benchmark_returns_df.columns]
 
-    benchmark_series = None
-    if benchmark_returns_df is not None and benchmark_choice in benchmark_returns_df.columns:
+    if len(benchmark_options) == 0:
+        benchmark_choice = None
+        benchmark_series = None
+    else:
+        benchmark_choice = st.selectbox(
+            "Relative Analytics Benchmark",
+            options=benchmark_options,
+            index=0,
+        )
         benchmark_series = benchmark_returns_df[benchmark_choice].copy()
         benchmark_series.name = benchmark_choice
 
+    # -----------------------------------------------------
     # Portfolio weights
+    # -----------------------------------------------------
     weights = get_weights_from_method(
         allocation_method=allocation_method,
         selected_etfs=selected_etfs,
@@ -477,19 +501,27 @@ def main():
         custom_weights=custom_weights,
     )
 
-    # Optional BL overlay
+    # -----------------------------------------------------
+    # Optional Black-Litterman overlay
+    # -----------------------------------------------------
     posterior = None
     if use_bl:
         posterior = run_black_litterman_overlay(selected_etfs, optimizer)
 
+    # -----------------------------------------------------
     # Allocation report
+    # -----------------------------------------------------
     allocation_df = allocation_table(selected_etfs, weights, INVESTMENT_UNIVERSE)
 
+    # -----------------------------------------------------
     # Portfolio returns
+    # -----------------------------------------------------
     portfolio_returns = returns @ weights
     portfolio_returns.name = "Portfolio"
 
+    # -----------------------------------------------------
     # Monte Carlo
+    # -----------------------------------------------------
     mc_engine = MonteCarloEngine(
         mean_returns=returns.mean(),
         cov_matrix=optimizer.cov_matrix,
@@ -500,7 +532,9 @@ def main():
     with st.spinner("Running Monte Carlo simulation..."):
         sim_results = mc_engine.run(weights, initial_investment)
 
+    # -----------------------------------------------------
     # Core analytics
+    # -----------------------------------------------------
     risk_df = risk_summary_table(
         portfolio_returns,
         risk_free_rate=risk_free_rate,
@@ -535,6 +569,7 @@ def main():
             window=63,
             confidence=0.95,
         )
+
         te = tracking_error(portfolio_returns, benchmark_series)
         ir = information_ratio(portfolio_returns, benchmark_series)
         beta, alpha = beta_alpha(portfolio_returns, benchmark_series)
@@ -552,11 +587,15 @@ def main():
         beta = np.nan
         alpha = np.nan
 
+    # -----------------------------------------------------
     # Regime detection
+    # -----------------------------------------------------
     regime_detector = RegimeDetector(portfolio_returns, window=63)
     regime_df = regime_detector.detect()
 
+    # -----------------------------------------------------
     # Reporting tables
+    # -----------------------------------------------------
     benchmark_prob_df = benchmark_probability_table(
         sim_results["final_values"],
         initial_investment,
@@ -567,7 +606,9 @@ def main():
         initial_investment,
     )
 
+    # -----------------------------------------------------
     # Top metrics
+    # -----------------------------------------------------
     render_top_summary_metrics(
         portfolio_returns=portfolio_returns,
         benchmark_returns=benchmark_series,
@@ -575,7 +616,9 @@ def main():
         initial_investment=initial_investment,
     )
 
+    # -----------------------------------------------------
     # Tabs
+    # -----------------------------------------------------
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         [
             "Executive Summary",
@@ -608,7 +651,7 @@ def main():
         st.dataframe(risk_df, use_container_width=True, hide_index=True)
 
         if benchmark_series is not None and not benchmark_series.empty:
-            st.markdown("### Benchmark Relative Analytics")
+            st.markdown(f"### Benchmark Relative Analytics vs {benchmark_choice}")
             rc1, rc2, rc3, rc4 = st.columns(4)
 
             with rc1:
@@ -675,13 +718,15 @@ def main():
             )
             st.dataframe(posterior_df, use_container_width=True, hide_index=True)
 
-        # Show current ETF info
         info_df = pd.DataFrame(
             {
                 "Ticker": selected_etfs,
                 "Name": [INVESTMENT_UNIVERSE[t]["name"] for t in selected_etfs],
                 "Category": [INVESTMENT_UNIVERSE[t]["category"] for t in selected_etfs],
-                "Current Price": [current_prices[t] if t in current_prices.index else np.nan for t in selected_etfs],
+                "Current Price": [
+                    current_prices[t] if t in current_prices.index else np.nan
+                    for t in selected_etfs
+                ],
             }
         )
         st.markdown("### ETF Universe Snapshot")
@@ -747,7 +792,7 @@ def main():
         summary_lines = build_pdf_summary_lines(
             selected_etfs=selected_etfs,
             initial_investment=initial_investment,
-            benchmark_choice=benchmark_choice,
+            benchmark_choice=benchmark_choice if benchmark_choice is not None else "N/A",
             sim_results=sim_results,
             risk_df=risk_df,
             rel_tail_df=rel_tail_df,
