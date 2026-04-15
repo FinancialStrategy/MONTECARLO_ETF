@@ -1,35 +1,44 @@
 # exports/pdf_export.py
 
 """
-PDF export module for the Institutional Portfolio Analytics Platform.
+Robust PDF export module for the Institutional Portfolio Analytics Platform.
 
-This implementation is designed to be safe for Streamlit Cloud and fpdf2
-when using standard core fonts such as Arial / Helvetica.
-
-Key protections:
-- sanitizes Unicode characters that commonly break FPDF core fonts
-- safely handles None / NaN values
-- avoids multi_cell crashes from unsupported characters
-- returns an in-memory BytesIO object for st.download_button
+This version is hardened for Streamlit Cloud and fpdf2:
+- sanitizes problematic Unicode
+- wraps long tokens aggressively
+- avoids width=0 in multi_cell
+- falls back safely when multi_cell fails
+- returns BytesIO for Streamlit download_button
 """
 
 from __future__ import annotations
 
 import io
 import math
+import re
+import textwrap
 import unicodedata
-from typing import Iterable
+from typing import Iterable, List
 
 from fpdf import FPDF
+from fpdf.errors import FPDFException
 
 
 # =========================================================
-# Text sanitization helpers
+# Constants
+# =========================================================
+PAGE_WIDTH_MM = 210
+LEFT_MARGIN_MM = 10
+RIGHT_MARGIN_MM = 10
+TOP_MARGIN_MM = 15
+BOTTOM_MARGIN_MM = 15
+USABLE_WIDTH_MM = PAGE_WIDTH_MM - LEFT_MARGIN_MM - RIGHT_MARGIN_MM
+
+
+# =========================================================
+# Utility helpers
 # =========================================================
 def _is_nan_like(value) -> bool:
-    """
-    Detect NaN-like values safely.
-    """
     try:
         return value is None or (isinstance(value, float) and math.isnan(value))
     except Exception:
@@ -38,17 +47,7 @@ def _is_nan_like(value) -> bool:
 
 def _sanitize_pdf_text(text) -> str:
     """
-    Convert text into a PDF-safe ASCII-compatible form for built-in FPDF fonts.
-
-    Why needed:
-    FPDF core fonts do not support many Unicode glyphs.
-    Streamlit Cloud often surfaces this as an FPDFException inside multi_cell().
-
-    This sanitizer:
-    - converts None / NaN to readable placeholders
-    - normalizes Unicode text
-    - replaces common problematic glyphs
-    - strips unsupported remaining characters
+    Convert text into a conservative Latin-1-safe representation.
     """
     if _is_nan_like(text):
         return "N/A"
@@ -58,158 +57,255 @@ def _sanitize_pdf_text(text) -> str:
 
     s = str(text)
 
-    # Common replacements for problematic typography/symbols
     replacements = {
-        "\u2013": "-",   # en dash
-        "\u2014": "-",   # em dash
-        "\u2212": "-",   # minus sign
-        "\u2018": "'",   # left single quote
-        "\u2019": "'",   # right single quote
-        "\u201c": '"',   # left double quote
-        "\u201d": '"',   # right double quote
-        "\u2022": "-",   # bullet
-        "\u00b7": "-",   # middle dot
-        "\u00a0": " ",   # non-breaking space
-        "\u2026": "...", # ellipsis
-        "\u20ac": "EUR", # euro
-        "\u00a3": "GBP", # pound
-        "\u00a5": "JPY", # yen
-        "\u00ae": "(R)",
+        "\u2013": "-",     # en dash
+        "\u2014": "-",     # em dash
+        "\u2212": "-",     # minus sign
+        "\u2018": "'",     # left single quote
+        "\u2019": "'",     # right single quote
+        "\u201c": '"',     # left double quote
+        "\u201d": '"',     # right double quote
+        "\u2022": "-",     # bullet
+        "\u00b7": "-",     # middle dot
+        "\u2026": "...",   # ellipsis
+        "\u00a0": " ",     # nbsp
+        "\u2009": " ",     # thin space
+        "\u2002": " ",
+        "\u2003": " ",
+        "\u200b": "",      # zero width space
+        "\ufeff": "",      # BOM
+        "\t": "    ",
+        "\r": "\n",
+        "\u20ac": "EUR",
+        "\u00a3": "GBP",
+        "\u00a5": "JPY",
         "\u2122": "(TM)",
-        "\u00b0": " deg ",
+        "\u00ae": "(R)",
+        "\u00a9": "(C)",
     }
 
     for bad, good in replacements.items():
         s = s.replace(bad, good)
 
-    # Normalize accents and compatibility characters
     s = unicodedata.normalize("NFKD", s)
-
-    # Keep only characters safe for latin-1/core font workflow
     s = s.encode("latin-1", "ignore").decode("latin-1")
 
-    # Remove control chars except newline/tab
-    cleaned_chars = []
+    cleaned = []
     for ch in s:
         code = ord(ch)
-        if ch in ("\n", "\t"):
-            cleaned_chars.append(ch)
+        if ch == "\n":
+            cleaned.append(ch)
         elif 32 <= code <= 255:
-            cleaned_chars.append(ch)
+            cleaned.append(ch)
         else:
-            cleaned_chars.append(" ")
+            cleaned.append(" ")
 
-    s = "".join(cleaned_chars)
+    s = "".join(cleaned)
 
-    # Collapse overly repeated whitespace
-    s = " ".join(s.split()) if "\n" not in s else "\n".join(" ".join(part.split()) for part in s.splitlines())
+    # Normalize whitespace line by line
+    lines = []
+    for line in s.splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+        lines.append(line)
 
-    if not s.strip():
-        return "-"
+    s = "\n".join(lines).strip()
 
-    return s
+    return s if s else "-"
 
 
-def _safe_multicell(pdf: FPDF, width: float, line_height: float, text) -> None:
+def _break_long_token(token: str, max_chunk: int = 40) -> List[str]:
     """
-    Write text safely using multi_cell after sanitization.
+    Break a single long token into smaller chunks so PDF line wrapping won't fail.
+    """
+    if len(token) <= max_chunk:
+        return [token]
+
+    return [token[i:i + max_chunk] for i in range(0, len(token), max_chunk)]
+
+
+def _wrap_text_for_pdf(text: str, max_chars_per_line: int = 95, max_token_len: int = 40) -> List[str]:
+    """
+    Wrap text conservatively for PDF output.
+
+    Strategy:
+    - split by original lines
+    - split long tokens
+    - rebuild text
+    - wrap to safe line width
+    """
+    if not text:
+        return ["-"]
+
+    out_lines: List[str] = []
+
+    for raw_line in text.splitlines():
+        raw_line = raw_line.strip()
+
+        if raw_line == "":
+            out_lines.append("")
+            continue
+
+        tokens = raw_line.split(" ")
+        rebuilt_tokens: List[str] = []
+
+        for token in tokens:
+            if token == "":
+                continue
+
+            # Break URLs / huge identifiers / long words
+            if len(token) > max_token_len:
+                rebuilt_tokens.extend(_break_long_token(token, max_chunk=max_token_len))
+            else:
+                rebuilt_tokens.append(token)
+
+        rebuilt_line = " ".join(rebuilt_tokens)
+
+        wrapped = textwrap.wrap(
+            rebuilt_line,
+            width=max_chars_per_line,
+            break_long_words=True,
+            break_on_hyphens=True,
+            replace_whitespace=False,
+            drop_whitespace=True,
+        )
+
+        if not wrapped:
+            out_lines.append("")
+        else:
+            out_lines.extend(wrapped)
+
+    return out_lines if out_lines else ["-"]
+
+
+def _safe_write_lines(pdf: FPDF, lines: List[str], line_height: float = 7.0) -> None:
+    """
+    Safely write pre-wrapped lines to PDF with a multi_cell fallback.
+    """
+    for line in lines:
+        # preserve paragraph spacing
+        if line.strip() == "":
+            pdf.ln(line_height)
+            continue
+
+        # Add page if needed
+        if pdf.get_y() > (297 - BOTTOM_MARGIN_MM - 10):
+            pdf.add_page()
+            pdf.set_font("Helvetica", size=11)
+
+        try:
+            # Use fixed width instead of width=0
+            pdf.multi_cell(USABLE_WIDTH_MM, line_height, line)
+        except FPDFException:
+            # Last-resort fallback: if multi_cell still fails, hard-split further
+            tiny_chunks = textwrap.wrap(
+                line,
+                width=50,
+                break_long_words=True,
+                break_on_hyphens=True,
+            )
+
+            if not tiny_chunks:
+                tiny_chunks = ["-"]
+
+            for chunk in tiny_chunks:
+                if pdf.get_y() > (297 - BOTTOM_MARGIN_MM - 10):
+                    pdf.add_page()
+                    pdf.set_font("Helvetica", size=11)
+
+                # cell is even safer than multi_cell for short pieces
+                safe_chunk = chunk[:200] if chunk else "-"
+                try:
+                    pdf.cell(USABLE_WIDTH_MM, line_height, safe_chunk, ln=1)
+                except FPDFException:
+                    # absolute emergency fallback
+                    pdf.cell(USABLE_WIDTH_MM, line_height, "-", ln=1)
+
+
+def _write_block(pdf: FPDF, text, line_height: float = 7.0, max_chars_per_line: int = 95) -> None:
+    """
+    End-to-end safe text writer for PDF blocks.
     """
     safe_text = _sanitize_pdf_text(text)
-
-    # Preserve blank lines intentionally
-    if safe_text.strip() == "":
-        pdf.ln(line_height)
-        return
-
-    pdf.multi_cell(width, line_height, safe_text)
+    wrapped_lines = _wrap_text_for_pdf(
+        safe_text,
+        max_chars_per_line=max_chars_per_line,
+        max_token_len=40,
+    )
+    _safe_write_lines(pdf, wrapped_lines, line_height=line_height)
 
 
 # =========================================================
-# Main export function
+# Main PDF builder
 # =========================================================
 def build_pdf_report(summary_lines: Iterable[str]) -> io.BytesIO:
     """
-    Build a simple multi-page institutional PDF report from a list of summary lines.
-
-    Parameters
-    ----------
-    summary_lines : iterable of str
-        Report text lines to render.
-
-    Returns
-    -------
-    io.BytesIO
-        In-memory PDF buffer for Streamlit download_button.
+    Build a robust PDF report from summary lines.
     """
     pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=False)
+    pdf.set_margins(LEFT_MARGIN_MM, TOP_MARGIN_MM, RIGHT_MARGIN_MM)
     pdf.set_title("Institutional Portfolio Analytics Report")
     pdf.set_author("OpenAI")
     pdf.set_creator("Institutional Portfolio Analytics Platform")
 
-    # -----------------------------
-    # Page 1 - Cover / Header
-    # -----------------------------
+    # -----------------------------------------------------
+    # Page 1
+    # -----------------------------------------------------
     pdf.add_page()
 
+    # Header
     pdf.set_font("Helvetica", "B", 16)
-    _safe_multicell(pdf, 0, 10, "Institutional Portfolio Analytics Report")
-
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "", 11)
-    _safe_multicell(
-        pdf,
-        0,
-        7,
-        "Executive summary generated from the Streamlit-based analytics platform."
-    )
-
-    pdf.ln(4)
-    pdf.set_draw_color(120, 120, 120)
-    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-    pdf.ln(5)
-
-    # -----------------------------
-    # Summary section
-    # -----------------------------
-    pdf.set_font("Helvetica", "B", 13)
-    _safe_multicell(pdf, 0, 8, "Summary")
+    _write_block(pdf, "Institutional Portfolio Analytics Report", line_height=9, max_chars_per_line=70)
 
     pdf.ln(1)
+
+    pdf.set_font("Helvetica", "", 11)
+    _write_block(
+        pdf,
+        "Executive summary generated from the Streamlit-based analytics platform.",
+        line_height=7,
+        max_chars_per_line=90,
+    )
+
+    pdf.ln(3)
+
+    # Divider
+    y = pdf.get_y()
+    pdf.set_draw_color(120, 120, 120)
+    pdf.line(LEFT_MARGIN_MM, y, PAGE_WIDTH_MM - RIGHT_MARGIN_MM, y)
+    pdf.ln(5)
+
+    # Section title
+    pdf.set_font("Helvetica", "B", 13)
+    _write_block(pdf, "Summary", line_height=8, max_chars_per_line=80)
+    pdf.ln(1)
+
+    # Summary body
     pdf.set_font("Helvetica", "", 11)
 
     if summary_lines is None:
         summary_lines = []
 
     for line in summary_lines:
-        safe_line = _sanitize_pdf_text(line)
+        _write_block(pdf, line, line_height=7, max_chars_per_line=95)
 
-        # Add page break safety
-        if pdf.get_y() > 270:
-            pdf.add_page()
-            pdf.set_font("Helvetica", "", 11)
+    pdf.ln(3)
 
-        _safe_multicell(pdf, 0, 7, safe_line)
-
-    # -----------------------------
     # Footer note
-    # -----------------------------
-    pdf.ln(4)
     pdf.set_font("Helvetica", "I", 9)
-    _safe_multicell(
+    _write_block(
         pdf,
-        0,
-        5,
         "Note: This report is model-based and intended for analytical use only. "
-        "It does not constitute investment advice."
+        "It does not constitute investment advice.",
+        line_height=5,
+        max_chars_per_line=100,
     )
 
-    # -----------------------------
-    # Export as bytes
-    # -----------------------------
+    # -----------------------------------------------------
+    # Output
+    # -----------------------------------------------------
     raw = pdf.output(dest="S")
 
-    # fpdf2 may return str or bytes depending on version/environment
     if isinstance(raw, str):
         raw = raw.encode("latin-1", errors="ignore")
 
