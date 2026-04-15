@@ -1,18 +1,5 @@
 # core/optimization.py
 
-"""
-Portfolio optimization engine for the Institutional Portfolio Analytics Platform.
-
-Features:
-- sample covariance or Ledoit-Wolf shrinkage covariance
-- maximum Sharpe portfolio
-- minimum volatility portfolio
-- maximum return portfolio
-- tracking error optimization versus benchmark
-- robust index cleaning and duplicate-label protection
-- deployment-safe optimization workflow for Streamlit Cloud
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -28,15 +15,8 @@ except Exception:
     SKLEARN_AVAILABLE = False
 
 
-# =========================================================
-# Utility helpers
-# =========================================================
-def _ensure_unique_sorted_index(df: pd.DataFrame | pd.Series):
-    """
-    Remove duplicate index labels and sort.
-    Keeps the last occurrence for duplicated dates.
-    """
-    obj = df.copy()
+def _ensure_unique_sorted_index(obj: pd.DataFrame | pd.Series):
+    obj = obj.copy()
     obj = obj[~obj.index.duplicated(keep="last")]
     obj = obj.sort_index()
     return obj
@@ -52,9 +32,6 @@ def _safe_divide(a: float, b: float) -> float:
 
 
 def _nearest_psd_cov(cov: pd.DataFrame) -> pd.DataFrame:
-    """
-    Project covariance matrix onto the nearest PSD approximation.
-    """
     vals, vecs = np.linalg.eigh(cov.values)
     vals = np.clip(vals, 1e-10, None)
     repaired = vecs @ np.diag(vals) @ vecs.T
@@ -62,14 +39,7 @@ def _nearest_psd_cov(cov: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(repaired, index=cov.index, columns=cov.columns)
 
 
-# =========================================================
-# Main optimizer
-# =========================================================
 class PortfolioOptimizer:
-    """
-    Portfolio optimizer for institutional analytics.
-    """
-
     def __init__(
         self,
         returns: pd.DataFrame,
@@ -83,8 +53,6 @@ class PortfolioOptimizer:
             raise ValueError("PortfolioOptimizer expects returns as a pandas DataFrame.")
 
         cleaned = returns.copy()
-
-        # Ensure numeric
         for col in cleaned.columns:
             cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
 
@@ -103,13 +71,7 @@ class PortfolioOptimizer:
         self.mean_returns = self.returns.mean()
         self.cov_matrix = self._build_covariance(covariance_method)
 
-    # -----------------------------------------------------
-    # Covariance
-    # -----------------------------------------------------
     def _build_covariance(self, method: str) -> pd.DataFrame:
-        """
-        Build covariance matrix using selected method.
-        """
         method = (method or "Sample").strip()
 
         if method == "Ledoit-Wolf" and SKLEARN_AVAILABLE:
@@ -123,33 +85,17 @@ class PortfolioOptimizer:
         else:
             cov = self.returns.cov()
 
-        cov = _nearest_psd_cov(cov)
-        return cov
+        return _nearest_psd_cov(cov)
 
-    # -----------------------------------------------------
-    # Portfolio statistics
-    # -----------------------------------------------------
     def portfolio_stats(self, weights: np.ndarray):
-        """
-        Return annualized return, annualized volatility, and Sharpe ratio.
-        """
         w = np.asarray(weights, dtype=float)
-
         mu_daily = float(np.dot(self.mean_returns.values, w))
         ann_return = (1.0 + mu_daily) ** TRADING_DAYS - 1.0
-
         ann_vol = float(np.sqrt(w.T @ (self.cov_matrix.values * TRADING_DAYS) @ w))
         sharpe = _safe_divide(ann_return - self.risk_free_rate, ann_vol)
-
         return ann_return, ann_vol, sharpe
 
-    # -----------------------------------------------------
-    # Generic optimization
-    # -----------------------------------------------------
     def optimize(self, objective: str = "max_sharpe") -> np.ndarray:
-        """
-        Optimize portfolio according to selected objective.
-        """
         n = len(self.returns.columns)
         x0 = np.repeat(1.0 / n, n)
 
@@ -188,23 +134,10 @@ class PortfolioOptimizer:
 
         return x0
 
-    # -----------------------------------------------------
-    # Tracking error optimization
-    # -----------------------------------------------------
     def optimize_tracking_error(self, benchmark_returns: pd.Series | pd.DataFrame) -> np.ndarray:
-        """
-        Minimize annualized tracking error versus a benchmark.
-
-        This method is robust to:
-        - duplicate dates
-        - benchmark provided as DataFrame or Series
-        - index misalignment
-        - accidental object broadcasting issues
-        """
         if benchmark_returns is None or len(benchmark_returns) == 0:
             raise ValueError("Benchmark returns are empty.")
 
-        # Clean asset returns
         asset_returns = self.returns.copy()
         asset_returns = _ensure_unique_sorted_index(asset_returns)
         asset_returns = asset_returns.dropna(how="any")
@@ -212,7 +145,6 @@ class PortfolioOptimizer:
         if asset_returns.empty:
             raise ValueError("Asset returns are empty after cleaning in optimize_tracking_error.")
 
-        # Convert benchmark to a clean Series
         if isinstance(benchmark_returns, pd.DataFrame):
             if benchmark_returns.shape[1] == 0:
                 raise ValueError("Benchmark DataFrame contains no columns.")
@@ -228,7 +160,6 @@ class PortfolioOptimizer:
         if benchmark.empty:
             raise ValueError("Benchmark returns are empty after cleaning in optimize_tracking_error.")
 
-        # Explicit alignment on common dates
         combined = pd.concat([asset_returns, benchmark.rename("benchmark")], axis=1, join="inner")
         combined = combined[~combined.index.duplicated(keep="last")]
         combined = combined.sort_index()
@@ -246,9 +177,8 @@ class PortfolioOptimizer:
         if asset_aligned.shape[0] < 20:
             raise ValueError("Insufficient overlapping history for tracking error optimization.")
 
-        # Convert to numpy arrays to avoid pandas alignment issues inside optimizer
-        X = asset_aligned.values  # shape: (T, N)
-        b = benchmark_aligned.values.reshape(-1)  # shape: (T,)
+        X = asset_aligned.values
+        b = benchmark_aligned.values.reshape(-1)
 
         n_assets = X.shape[1]
         x0 = np.repeat(1.0 / n_assets, n_assets)
@@ -257,9 +187,6 @@ class PortfolioOptimizer:
         constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
         def objective(w):
-            """
-            Annualized tracking error.
-            """
             w = np.asarray(w, dtype=float)
             portfolio_path = X @ w
             active = portfolio_path - b
