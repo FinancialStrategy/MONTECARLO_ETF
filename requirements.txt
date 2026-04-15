@@ -8,3 +8,5 @@ scikit-learn
 xlsxwriter
 fpdf2
 openpyxl
+pillow
+matplotlib

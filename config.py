@@ -1,5 +1,3 @@
-# config.py
-
 TRADING_DAYS = 252
 ROLLING_WINDOW = 63
 VAR_CONFIDENCE = 0.95
@@ -7,6 +5,12 @@ DEFAULT_RISK_FREE_RATE = 0.03
 DEFAULT_TAU = 0.05
 DEFAULT_NUM_SIMULATIONS = 10000
 DEFAULT_FORECAST_DAYS = 252
+DEFAULT_REGIME_WINDOW = 63
+APP_TITLE = "Institutional Portfolio Analytics Platform"
+APP_SUBTITLE = (
+    "Black-Litterman posterior optimization, benchmark-relative efficient frontier, "
+    "active risk budgeting, rolling relative tail risk, and executive reporting."
+)
 
 INVESTMENT_UNIVERSE = {
     "SPY": {"name": "SPDR S&P 500 ETF", "category": "Large Cap", "expense_ratio": 0.0945},
