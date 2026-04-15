@@ -1,0 +1,10 @@
+streamlit
+numpy
+pandas
+yfinance
+plotly
+scipy
+scikit-learn
+xlsxwriter
+fpdf2
+openpyxl
