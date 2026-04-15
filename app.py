@@ -7,7 +7,7 @@ Main Streamlit application entry point.
 Features:
 - modular architecture
 - Black-Litterman views + confidence sliders
-- tracking error optimization
+- tracking error optimization with safe fallback
 - Monte Carlo simulation
 - benchmark-relative analytics
 - rolling relative VaR / CVaR / ES
@@ -93,8 +93,13 @@ def normalize_weights(weights: np.ndarray) -> np.ndarray:
     """
     weights = np.asarray(weights, dtype=float)
     total = weights.sum()
+
+    if len(weights) == 0:
+        return weights
+
     if total <= 0 or np.isnan(total):
         return np.repeat(1.0 / len(weights), len(weights))
+
     return weights / total
 
 
@@ -124,7 +129,7 @@ def render_top_summary_metrics(
     initial_investment: float,
 ) -> None:
     """
-    Render summary KPI row.
+    Render summary KPI rows.
     """
     risk_df = risk_summary_table(portfolio_returns)
     risk_map = dict(zip(risk_df["Metric"], risk_df["Value"]))
@@ -175,10 +180,19 @@ def render_top_summary_metrics(
         st.metric("Probability of Profit", f"{prob_profit:.2f}%")
 
     c6, c7, c8 = st.columns(3)
+
     with c6:
-        st.metric("Tracking Error", f"{te * 100:.2f}%" if pd.notna(te) else "N/A")
+        st.metric(
+            "Tracking Error",
+            f"{te * 100:.2f}%" if pd.notna(te) else "N/A",
+        )
+
     with c7:
-        st.metric("Information Ratio", f"{ir:.3f}" if pd.notna(ir) else "N/A")
+        st.metric(
+            "Information Ratio",
+            f"{ir:.3f}" if pd.notna(ir) else "N/A",
+        )
+
     with c8:
         st.metric(
             "Expected Max Drawdown",
@@ -200,6 +214,9 @@ def get_weights_from_method(
     """
     n = len(selected_etfs)
 
+    if n == 0:
+        raise ValueError("No ETFs available for weight construction.")
+
     if allocation_method == "Equal Weight":
         return np.repeat(1.0 / n, n)
 
@@ -213,13 +230,26 @@ def get_weights_from_method(
         if benchmark_series is None or benchmark_series.empty:
             st.warning("Benchmark data unavailable. Falling back to equal weights.")
             return np.repeat(1.0 / n, n)
-        return normalize_weights(optimizer.optimize_tracking_error(benchmark_series))
+
+        try:
+            return normalize_weights(optimizer.optimize_tracking_error(benchmark_series))
+        except Exception as e:
+            st.warning(
+                f"Tracking error optimization failed. Falling back to equal weights. Details: {e}"
+            )
+            return np.repeat(1.0 / n, n)
 
     if allocation_method == "Custom Weights":
         if custom_weights is None:
             st.warning("Custom weights unavailable. Falling back to equal weights.")
             return np.repeat(1.0 / n, n)
-        return normalize_weights(np.array(custom_weights, dtype=float))
+
+        weights = np.array(custom_weights, dtype=float)
+        if len(weights) != n:
+            st.warning("Custom weights length does not match the number of valid ETFs. Falling back to equal weights.")
+            return np.repeat(1.0 / n, n)
+
+        return normalize_weights(weights)
 
     st.warning("Unknown allocation method detected. Falling back to equal weights.")
     return np.repeat(1.0 / n, n)
@@ -237,6 +267,10 @@ def run_black_litterman_overlay(
         "Define tactical absolute or relative views and assign confidence levels. "
         "Posterior expected returns will be computed from the view set."
     )
+
+    if len(selected_etfs) == 0:
+        st.warning("No ETFs available for Black-Litterman views.")
+        return None
 
     num_views = st.slider("Number of Black-Litterman Views", 1, min(5, len(selected_etfs)), 1)
     market_weights = np.repeat(1.0 / len(selected_etfs), len(selected_etfs))
@@ -256,6 +290,7 @@ def run_black_litterman_overlay(
         st.markdown(f"### View {i + 1}")
 
         c1, c2, c3 = st.columns(3)
+
         with c1:
             left_asset = st.selectbox(
                 f"Primary Asset {i + 1}",
@@ -330,7 +365,7 @@ def build_export_tables(
     """
     Assemble all report tables for Excel export.
     """
-    tables = {
+    return {
         "Allocation": allocation_df,
         "RiskSummary": risk_df,
         "RelativeTailRisk": rel_tail_df,
@@ -339,7 +374,6 @@ def build_export_tables(
         "RollingRelativeTail": rolling_tail_df.reset_index(),
         "Regimes": regime_df.reset_index(),
     }
-    return tables
 
 
 def build_pdf_summary_lines(
@@ -359,7 +393,7 @@ def build_pdf_summary_lines(
     if not rel_tail_df.empty and {"Metric", "Value"}.issubset(rel_tail_df.columns):
         rel_map = dict(zip(rel_tail_df["Metric"], rel_tail_df["Value"]))
 
-    summary_lines = [
+    return [
         "Institutional Portfolio Analytics Report",
         "",
         f"Selected ETFs: {', '.join(selected_etfs)}",
@@ -390,16 +424,11 @@ def build_pdf_summary_lines(
         else "Relative ES: N/A",
     ]
 
-    return summary_lines
-
 
 # =========================================================
 # Main app
 # =========================================================
 def main():
-    """
-    Main Streamlit app.
-    """
     apply_theme()
     render_hero_section()
 
@@ -548,6 +577,7 @@ def main():
             benchmark_returns=benchmark_series,
             confidence=0.95,
         )
+
         rel_tail_df = pd.DataFrame(
             {
                 "Metric": [
@@ -652,14 +682,18 @@ def main():
 
         if benchmark_series is not None and not benchmark_series.empty:
             st.markdown(f"### Benchmark Relative Analytics vs {benchmark_choice}")
+
             rc1, rc2, rc3, rc4 = st.columns(4)
 
             with rc1:
                 st.metric("Tracking Error", f"{te * 100:.2f}%" if pd.notna(te) else "N/A")
+
             with rc2:
                 st.metric("Information Ratio", f"{ir:.3f}" if pd.notna(ir) else "N/A")
+
             with rc3:
                 st.metric("Beta", f"{beta:.3f}" if pd.notna(beta) else "N/A")
+
             with rc4:
                 st.metric("Alpha", f"{alpha * 100:.2f}%" if pd.notna(alpha) else "N/A")
 
@@ -689,10 +723,13 @@ def main():
             )
 
         m1, m2, m3 = st.columns(3)
+
         with m1:
             st.metric("Expected Terminal Value", f"${sim_results['expected_value']:,.2f}")
+
         with m2:
             st.metric("Median Terminal Value", f"${sim_results['median_value']:,.2f}")
+
         with m3:
             st.metric("Terminal Std. Dev.", f"${sim_results['std_value']:,.2f}")
 
@@ -729,6 +766,7 @@ def main():
                 ],
             }
         )
+
         st.markdown("### ETF Universe Snapshot")
         st.dataframe(info_df, use_container_width=True, hide_index=True)
 
@@ -744,12 +782,16 @@ def main():
             st.markdown(f"### Relative Analytics vs {benchmark_choice}")
 
             rr1, rr2, rr3, rr4 = st.columns(4)
+
             with rr1:
                 st.metric("Tracking Error", f"{te * 100:.2f}%" if pd.notna(te) else "N/A")
+
             with rr2:
                 st.metric("Information Ratio", f"{ir:.3f}" if pd.notna(ir) else "N/A")
+
             with rr3:
                 st.metric("Beta", f"{beta:.3f}" if pd.notna(beta) else "N/A")
+
             with rr4:
                 st.metric("Alpha", f"{alpha * 100:.2f}%" if pd.notna(alpha) else "N/A")
 
@@ -797,6 +839,7 @@ def main():
             risk_df=risk_df,
             rel_tail_df=rel_tail_df,
         )
+
         pdf_file = build_pdf_report(summary_lines)
 
         st.download_button(
