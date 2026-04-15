@@ -1,16 +1,11 @@
 # exports/__init__.py
 
 """
-Exports package initialization for generating institutional reports.
+Exports package for the Institutional Portfolio Analytics Platform.
 
-This module provides utilities for exporting analytics results to Excel
-and PDF formats suitable for executive and institutional reporting.
+This file is intentionally minimal to avoid import-chain problems during
+app startup. Import export utilities directly where needed, for example:
+
+    from exports.excel_export import build_excel_report
+    from exports.pdf_export import build_pdf_report
 """
-
-from .excel_export import build_excel_report
-from .pdf_export import build_pdf_report
-
-__all__ = [
-    "build_excel_report",
-    "build_pdf_report",
-]
