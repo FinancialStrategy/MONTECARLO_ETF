@@ -1,0 +1,212 @@
+# ============================================================
+# Python Bytecode and Cache
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+
+# C extensions
+*.dll
+*.dylib
+
+# ============================================================
+# Virtual Environments
+# ============================================================
+venv/
+env/
+ENV/
+.venv/
+.virtualenv/
+.python-version
+
+# ============================================================
+# Streamlit
+# ============================================================
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+.streamlit/config.toml
+
+# ============================================================
+# Jupyter Notebook
+# ============================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ============================================================
+# Data Files (Financial Analytics)
+# ============================================================
+# Raw and processed datasets
+data/
+datasets/
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.h5
+*.db
+*.sqlite
+*.sqlite3
+*.json
+*.pickle
+*.pkl
+
+# Uncomment the following if you want to keep sample datasets
+# !data/sample_data.csv
+
+# ============================================================
+# Generated Reports & Exports
+# ============================================================
+reports/
+exports/
+output/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.html
+*.docx
+
+# Keep branding assets if needed
+!assets/
+!assets/logo.png
+!assets/*.png
+!assets/*.jpg
+!assets/*.svg
+
+# ============================================================
+# Logs and Temporary Files
+# ============================================================
+logs/
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# ============================================================
+# Environment Variables and Secrets
+# ============================================================
+.env
+.env.*
+*.env
+
+# API keys or credentials
+secrets/
+credentials/
+*.pem
+*.key
+
+# ============================================================
+# Package Distribution
+# ============================================================
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# ============================================================
+# Testing and Coverage
+# ============================================================
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+coverage.xml
+
+# ============================================================
+# Type Checkers
+# ============================================================
+.mypy_cache/
+.pyre/
+.pytype/
+.dmypy.json
+
+# ============================================================
+# IDEs and Editors
+# ============================================================
+# VS Code
+.vscode/
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject/
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================
+# Operating System Files
+# ============================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# ============================================================
+# Git and Versioning
+# ============================================================
+# Ignore local git configuration backups
+*.orig
+
+# ============================================================
+# Financial Modeling Specific
+# ============================================================
+# Backtesting results
+backtests/
+simulations/
+scenario_outputs/
+
+# Model artifacts
+models/
+checkpoints/
+*.model
+*.joblib
+*.onnx
+
+# Large binary or cache files
+*.npz
+*.npy
+
+# ============================================================
+# Documentation Build
+# ============================================================
+docs/_build/
+site/
+
+# ============================================================
+# Optional: Allow Specific Example Files
+# ============================================================
+# Example configuration or template files
+!.env.example
+!.streamlit/secrets.example.toml
+!README.md
+!requirements.txt
+!config.py
+!app.py
